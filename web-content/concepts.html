@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Key Concepts - Financial Engineering</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <h1>Financial Engineering</h1>
+            <ul>
+                <li><a href="index.html">Home</a></li>
+                <li><a href="concepts.html">Key Concepts</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section class="hero">
+            <h2>Key Concepts in Financial Mathematics</h2>
+            <p>Essential theories and models</p>
+        </section>
+
+        <section class="content">
+            <h3>Black-Scholes Model</h3>
+            <p>
+                The Black-Scholes model is a fundamental equation in financial mathematics used for pricing 
+                European-style options. Developed by Fischer Black, Myron Scholes, and Robert Merton in 1973, 
+                it revolutionized derivatives trading by providing a closed-form solution for option valuation.
+            </p>
+            <div class="formula">
+                <p><strong>Key Assumptions:</strong></p>
+                <ul>
+                    <li>No arbitrage opportunities</li>
+                    <li>Constant risk-free rate and volatility</li>
+                    <li>Log-normal distribution of stock prices</li>
+                    <li>No transaction costs or taxes</li>
+                </ul>
+            </div>
+
+            <h3>Stochastic Calculus</h3>
+            <p>
+                Stochastic calculus extends traditional calculus to handle random processes. In finance, 
+                it's essential for modeling asset price movements and deriving pricing equations. The most 
+                important concept is the Wiener process (Brownian motion), which forms the basis for modeling 
+                continuous-time random behavior in financial markets.
+            </p>
+
+            <h3>Monte Carlo Simulation</h3>
+            <p>
+                Monte Carlo methods use repeated random sampling to obtain numerical results. In financial 
+                engineering, these simulations are invaluable for:
+            </p>
+            <div class="card-container">
+                <div class="card">
+                    <h4>Option Pricing</h4>
+                    <p>Valuing complex derivatives with path-dependent features that lack closed-form solutions.</p>
+                </div>
+                <div class="card">
+                    <h4>Risk Assessment</h4>
+                    <p>Estimating portfolio risk measures and stress testing under various market scenarios.</p>
+                </div>
+                <div class="card">
+                    <h4>Credit Risk</h4>
+                    <p>Modeling default probabilities and credit exposures in complex portfolios.</p>
+                </div>
+            </div>
+
+            <h3>Interest Rate Models</h3>
+            <p>
+                Interest rate models describe the evolution of interest rates over time. Popular models include:
+            </p>
+            <ul class="applications-list">
+                <li><strong>Vasicek Model:</strong> Mean-reverting short rate model</li>
+                <li><strong>Cox-Ingersoll-Ross (CIR):</strong> Ensures positive interest rates</li>
+                <li><strong>Heath-Jarrow-Morton (HJM):</strong> Models the entire forward rate curve</li>
+                <li><strong>LIBOR Market Model:</strong> Industry standard for pricing interest rate derivatives</li>
+            </ul>
+
+            <h3>Value at Risk (VaR)</h3>
+            <p>
+                Value at Risk is a widely-used risk metric that estimates the maximum potential loss in a portfolio 
+                over a specific time period at a given confidence level. For example, a one-day 95% VaR of $1 million 
+                means there's a 5% chance of losing more than $1 million in a single day.
+            </p>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2025 Financial Engineering Resources. Educational purposes only.</p>
+    </footer>
+</body>
+</html>
