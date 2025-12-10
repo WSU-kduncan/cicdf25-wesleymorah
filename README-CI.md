@@ -1,3 +1,37 @@
+# Continuous Integration & Deployment Pipeline
+
+## Continuous Deployment Project Overview
+
+**Goal:** Automatically deploy updated Docker containers to AWS EC2 when new code is pushed to GitHub.
+
+**Tools and Roles:**
+- **GitHub Actions** - Builds and pushes Docker images when tags are pushed
+- **DockerHub** - Stores container images with semantic version tags
+- **GitHub Webhooks** - Notifies EC2 when deployment is ready
+- **AWS EC2** - Production server running the application
+- **webhook (adnanh)** - Listens for GitHub notifications on EC2
+- **Bash Script** - Automates pulling new images and restarting containers
+- **Docker** - Runs containerized web application
+
+**Deployment Diagram:**
+
+```mermaid
+graph LR
+    A[Developer] -->|Push + Tag| B[GitHub]
+    B -->|Triggers| C[GitHub Actions]
+    C -->|Builds| D[Docker Image]
+    C -->|Pushes| E[DockerHub]
+    C -->|Completes| F[GitHub Webhook]
+    F -->|POST Request| G[EC2 Webhook]
+    G -->|Validates| H[Refresh Script]
+    H -->|Pulls New Image| E
+    H -->|Restarts| I[Container]
+    I -->|Serves| J[Updated Website]
+```
+
+**Status:** All components working. EC2 IP changes when AWS Lab restarts - requires updating GitHub webhook URL.
+
+---
 # Continuous Integration Project
 
 ## Project Overview
