@@ -1,0 +1,13 @@
+[Unit]
+Description=Webhook listener for container updates
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/usr/bin/webhook -hooks /home/ubuntu/hooks.json -verbose -hotreload -port 9000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
