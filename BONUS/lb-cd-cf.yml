@@ -1,0 +1,794 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Bonus 2 - Containerized Load Balancer with Automated Deployment
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.0.0/23
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: LB-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 192.168.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: LB-PublicSubnet
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 192.168.1.0/24
+      Tags:
+        - Key: Name
+          Value: LB-PrivateSubnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for LB and web servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: LB-SecurityGroup
+
+  ProxyEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+
+  ProxyInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.0.10
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y haproxy git
+          systemctl enable haproxy
+          systemctl start haproxy
+          hostnamectl set-hostname proxy
+          reboot
+      Tags:
+        - Key: Name
+          Value: proxy
+
+  ProxyEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref ProxyInstance
+      EIP: !Ref ProxyEIP
+
+  WebServ1Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.1.10
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y docker.io git webhook
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          docker run -d --restart unless-stopped -p 80:80 --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          hostnamectl set-hostname webserv1
+          
+          # Set up webhook
+          cat > /home/ubuntu/refresh.sh << 'EOF'
+          #!/bin/bash
+          docker stop webserver || true
+          docker rm webserver || true
+          docker pull wesleymorah/cicdf25-wesleymorah:latest
+          docker run -d -p 80:80 --restart unless-stopped --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          docker image prune -f
+          echo "Refresh at $(date)" >> /var/log/refresh.log
+          EOF
+          
+          chmod +x /home/ubuntu/refresh.sh
+          chown ubuntu:ubuntu /home/ubuntu/refresh.sh
+          
+          cat > /home/ubuntu/hooks.json << 'EOF'
+          [
+            {
+              "id": "redeploy-webserver",
+              "execute-command": "/home/ubuntu/refresh.sh",
+              "command-working-directory": "/home/ubuntu",
+              "trigger-rule": {
+                "match": {
+                  "type": "payload-hash-sha256",
+                  "secret": "b6ec32cb84dc59ceec61cbce4f23e973be73367ce79001c40544a2f7ab77e614",
+                  "parameter": {
+                    "source": "header",
+                    "name": "X-Hub-Signature-256"
+                  }
+                }
+              }
+            }
+          ]
+          EOF
+          
+          chown ubuntu:ubuntu /home/ubuntu/hooks.json
+          
+          cat > /etc/systemd/system/webhook.service << 'EOF'
+          [Unit]
+          Description=Webhook listener
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ubuntu
+          ExecStart=/usr/bin/webhook -hooks /home/ubuntu/hooks.json -verbose -port 9000
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable webhook
+          systemctl start webhook
+          reboot
+      Tags:
+        - Key: Name
+          Value: webserv1
+
+  WebServ2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.1.11
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y docker.io git webhook
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          docker run -d --restart unless-stopped -p 80:80 --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          hostnamectl set-hostname webserv2
+          
+          # Set up webhook
+          cat > /home/ubuntu/refresh.sh << 'EOF'
+          #!/bin/bash
+          docker stop webserver || true
+          docker rm webserver || true
+          docker pull wesleymorah/cicdf25-wesleymorah:latest
+          docker run -d -p 80:80 --restart unless-stopped --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          docker image prune -f
+          echo "Refresh at $(date)" >> /var/log/refresh.log
+          EOF
+          
+          chmod +x /home/ubuntu/refresh.sh
+          chown ubuntu:ubuntu /home/ubuntu/refresh.sh
+          
+          cat > /home/ubuntu/hooks.json << 'EOF'
+          [
+            {
+              "id": "redeploy-webserver",
+              "execute-command": "/home/ubuntu/refresh.sh",
+              "command-working-directory": "/home/ubuntu",
+              "trigger-rule": {
+                "match": {
+                  "type": "payload-hash-sha256",
+                  "secret": "b6ec32cb84dc59ceec61cbce4f23e973be73367ce79001c40544a2f7ab77e614",
+                  "parameter": {
+                    "source": "header",
+                    "name": "X-Hub-Signature-256"
+                  }
+                }
+              }
+            }
+          ]
+          EOF
+          
+          chown ubuntu:ubuntu /home/ubuntu/hooks.json
+          
+          cat > /etc/systemd/system/webhook.service << 'EOF'
+          [Unit]
+          Description=Webhook listener
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ubuntu
+          ExecStart=/usr/bin/webhook -hooks /home/ubuntu/hooks.json -verbose -port 9000
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable webhook
+          systemctl start webhook
+          reboot
+      Tags:
+        - Key: Name
+          Value: webserv2
+
+  WebServ3Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.1.12
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y docker.io git webhook
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          docker run -d --restart unless-stopped -p 80:80 --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          hostnamectl set-hostname webserv3
+          
+          # Set up webhook
+          cat > /home/ubuntu/refresh.sh << 'EOF'
+          #!/bin/bash
+          docker stop webserver || true
+          docker rm webserver || true
+          docker pull wesleymorah/cicdf25-wesleymorah:latest
+          docker run -d -p 80:80 --restart unless-stopped --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          docker image prune -f
+          echo "Refresh at $(date)" >> /var/log/refresh.log
+          EOF
+          
+          chmod +x /home/ubuntu/refresh.sh
+          chown ubuntu:ubuntu /home/ubuntu/refresh.sh
+          
+          cat > /home/ubuntu/hooks.json << 'EOF'
+          [
+            {
+              "id": "redeploy-webserver",
+              "execute-command": "/home/ubuntu/refresh.sh",
+              "command-working-directory": "/home/ubuntu",
+              "trigger-rule": {
+                "match": {
+                  "type": "payload-hash-sha256",
+                  "secret": "b6ec32cb84dc59ceec61cbce4f23e973be73367ce79001c40544a2f7ab77e614",
+                  "parameter": {
+                    "source": "header",
+                    "name": "X-Hub-Signature-256"
+                  }
+                }
+              }
+            }
+          ]
+          EOF
+          
+          chown ubuntu:ubuntu /home/ubuntu/hooks.json
+          
+          cat > /etc/systemd/system/webhook.service << 'EOF'
+          [Unit]
+          Description=Webhook listener
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ubuntu
+          ExecStart=/usr/bin/webhook -hooks /home/ubuntu/hooks.json -verbose -port 9000
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable webhook
+          systemctl start webhook
+          reboot
+      Tags:
+        - Key: Name
+          Value: webserv3
+
+Outputs:
+  ProxyPublicIP:
+    Description: Public IP of proxy
+    Value: !Ref ProxyEIP
+  WebServ1PrivateIP:
+    Value: !GetAtt WebServ1Instance.PrivateIp
+  WebServ2PrivateIP:
+    Value: !GetAtt WebServ2Instance.PrivateIp
+  WebServ3PrivateIP:
+    Value: !GetAtt WebServ3Instance.PrivateIp
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.0.0/23
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: LB-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 192.168.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: LB-PublicSubnet
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 192.168.1.0/24
+      Tags:
+        - Key: Name
+          Value: LB-PrivateSubnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for LB and web servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: LB-SecurityGroup
+
+  ProxyEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+
+  ProxyInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.0.10
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y haproxy git
+          systemctl enable haproxy
+          systemctl start haproxy
+          hostnamectl set-hostname proxy
+          reboot
+      Tags:
+        - Key: Name
+          Value: proxy
+
+  ProxyEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref ProxyInstance
+      EIP: !Ref ProxyEIP
+
+  WebServ1Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.1.10
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y docker.io git webhook
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          docker run -d --restart unless-stopped -p 80:80 --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          hostnamectl set-hostname webserv1
+          
+          # Set up webhook
+          cat > /home/ubuntu/refresh.sh << 'EOF'
+          #!/bin/bash
+          docker stop webserver || true
+          docker rm webserver || true
+          docker pull wesleymorah/cicdf25-wesleymorah:latest
+          docker run -d -p 80:80 --restart unless-stopped --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          docker image prune -f
+          echo "Refresh at $(date)" >> /var/log/refresh.log
+          EOF
+          
+          chmod +x /home/ubuntu/refresh.sh
+          chown ubuntu:ubuntu /home/ubuntu/refresh.sh
+          
+          cat > /home/ubuntu/hooks.json << 'EOF'
+          [
+            {
+              "id": "redeploy-webserver",
+              "execute-command": "/home/ubuntu/refresh.sh",
+              "command-working-directory": "/home/ubuntu",
+              "trigger-rule": {
+                "match": {
+                  "type": "payload-hash-sha256",
+                  "secret": "b6ec32cb84dc59ceec61cbce4f23e973be73367ce79001c40544a2f7ab77e614",
+                  "parameter": {
+                    "source": "header",
+                    "name": "X-Hub-Signature-256"
+                  }
+                }
+              }
+            }
+          ]
+          EOF
+          
+          chown ubuntu:ubuntu /home/ubuntu/hooks.json
+          
+          cat > /etc/systemd/system/webhook.service << 'EOF'
+          [Unit]
+          Description=Webhook listener
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ubuntu
+          ExecStart=/usr/bin/webhook -hooks /home/ubuntu/hooks.json -verbose -port 9000
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable webhook
+          systemctl start webhook
+          reboot
+      Tags:
+        - Key: Name
+          Value: webserv1
+
+  WebServ2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.1.11
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y docker.io git webhook
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          docker run -d --restart unless-stopped -p 80:80 --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          hostnamectl set-hostname webserv2
+          
+          # Set up webhook
+          cat > /home/ubuntu/refresh.sh << 'EOF'
+          #!/bin/bash
+          docker stop webserver || true
+          docker rm webserver || true
+          docker pull wesleymorah/cicdf25-wesleymorah:latest
+          docker run -d -p 80:80 --restart unless-stopped --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          docker image prune -f
+          echo "Refresh at $(date)" >> /var/log/refresh.log
+          EOF
+          
+          chmod +x /home/ubuntu/refresh.sh
+          chown ubuntu:ubuntu /home/ubuntu/refresh.sh
+          
+          cat > /home/ubuntu/hooks.json << 'EOF'
+          [
+            {
+              "id": "redeploy-webserver",
+              "execute-command": "/home/ubuntu/refresh.sh",
+              "command-working-directory": "/home/ubuntu",
+              "trigger-rule": {
+                "match": {
+                  "type": "payload-hash-sha256",
+                  "secret": "b6ec32cb84dc59ceec61cbce4f23e973be73367ce79001c40544a2f7ab77e614",
+                  "parameter": {
+                    "source": "header",
+                    "name": "X-Hub-Signature-256"
+                  }
+                }
+              }
+            }
+          ]
+          EOF
+          
+          chown ubuntu:ubuntu /home/ubuntu/hooks.json
+          
+          cat > /etc/systemd/system/webhook.service << 'EOF'
+          [Unit]
+          Description=Webhook listener
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ubuntu
+          ExecStart=/usr/bin/webhook -hooks /home/ubuntu/hooks.json -verbose -port 9000
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable webhook
+          systemctl start webhook
+          reboot
+      Tags:
+        - Key: Name
+          Value: webserv2
+
+  WebServ3Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e86e20dae9224db8
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      PrivateIpAddress: 192.168.1.12
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          apt-get update
+          apt-get install -y docker.io git webhook
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          docker run -d --restart unless-stopped -p 80:80 --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          hostnamectl set-hostname webserv3
+          
+          # Set up webhook
+          cat > /home/ubuntu/refresh.sh << 'EOF'
+          #!/bin/bash
+          docker stop webserver || true
+          docker rm webserver || true
+          docker pull wesleymorah/cicdf25-wesleymorah:latest
+          docker run -d -p 80:80 --restart unless-stopped --name webserver wesleymorah/cicdf25-wesleymorah:latest
+          docker image prune -f
+          echo "Refresh at $(date)" >> /var/log/refresh.log
+          EOF
+          
+          chmod +x /home/ubuntu/refresh.sh
+          chown ubuntu:ubuntu /home/ubuntu/refresh.sh
+          
+          cat > /home/ubuntu/hooks.json << 'EOF'
+          [
+            {
+              "id": "redeploy-webserver",
+              "execute-command": "/home/ubuntu/refresh.sh",
+              "command-working-directory": "/home/ubuntu",
+              "trigger-rule": {
+                "match": {
+                  "type": "payload-hash-sha256",
+                  "secret": "b6ec32cb84dc59ceec61cbce4f23e973be73367ce79001c40544a2f7ab77e614",
+                  "parameter": {
+                    "source": "header",
+                    "name": "X-Hub-Signature-256"
+                  }
+                }
+              }
+            }
+          ]
+          EOF
+          
+          chown ubuntu:ubuntu /home/ubuntu/hooks.json
+          
+          cat > /etc/systemd/system/webhook.service << 'EOF'
+          [Unit]
+          Description=Webhook listener
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ubuntu
+          ExecStart=/usr/bin/webhook -hooks /home/ubuntu/hooks.json -verbose -port 9000
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable webhook
+          systemctl start webhook
+          reboot
+      Tags:
+        - Key: Name
+          Value: webserv3
+
+Outputs:
+  ProxyPublicIP:
+    Description: Public IP of proxy
+    Value: !Ref ProxyEIP
+  WebServ1PrivateIP:
+    Value: !GetAtt WebServ1Instance.PrivateIp
+  WebServ2PrivateIP:
+    Value: !GetAtt WebServ2Instance.PrivateIp
+  WebServ3PrivateIP:
+    Value: !GetAtt WebServ3Instance.PrivateIp
